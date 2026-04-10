@@ -1,0 +1,10 @@
+
+# Python cache
+scripts/__pycache__/
+*.pyc
+*.pyo
+
+# Build artifacts
+*.zip
+*.tar.gz
+out/

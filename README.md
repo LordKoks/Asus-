@@ -1,4 +1,4 @@
-# ASUS ROG Phone 5S — Custom Kernel: Wi-Fi Monitor Mode, USB Injection & AndrAX
+# ASUS ROG Phone 5S — Custom Kernel: Wi-Fi Monitor Mode, USB Injection, Full AndrAX & AI Pentest Agent
 
 > **Target device:** ASUS ROG Phone 5S (ZS676KS)  
 > **SoC:** Qualcomm Snapdragon 888+ (SM8350-AC)  
@@ -15,24 +15,33 @@
 4. [Enabled features](#enabled-features)
    - [Wi-Fi monitor mode](#wi-fi-monitor-mode)
    - [USB HID gadget (USB injection)](#usb-hid-gadget-usb-injection)
-   - [AndrAX-compatible networking stack](#andrax-compatible-networking-stack)
+   - [Full AndrAX support](#full-andrax-support)
 5. [Kernel configuration](#kernel-configuration)
 6. [Building the kernel](#building-the-kernel)
 7. [Flashing the kernel](#flashing-the-kernel)
 8. [Post-flash setup](#post-flash-setup)
-9. [Troubleshooting](#troubleshooting)
+9. [Installing AndrAX after the kernel flash](#installing-andrax-after-the-kernel-flash)
+10. [AI Pentest Agent](#ai-pentest-agent)
+11. [Verifying all features](#verifying-all-features)
+12. [Troubleshooting](#troubleshooting)
 
 ---
 
 ## Overview
 
-This repository documents how to build a custom Android kernel for the ASUS ROG Phone 5S that enables:
+This repository documents how to build a custom Android kernel for the ASUS ROG Phone 5S that enables **every feature required by AndrAX** (the ARM64 Android penetration-testing framework) plus an optional AI-powered pentest agent.
 
 | Feature | Purpose |
 |---|---|
-| **Wi-Fi monitor mode** | Passive wireless packet capture for security auditing |
+| **Wi-Fi monitor mode** | Passive wireless packet capture, injection (airodump-ng, aircrack-ng, wifite…) |
 | **USB HID gadget injection** | USB keyboard/mouse emulation (BadUSB / Rubber Ducky style) |
-| **AndrAX networking stack** | Full suite of kernel options required by [AndrAX](https://github.com/AndraxOS) penetration-testing framework |
+| **Full AndrAX networking stack** | TUN, bridges, iptables, nftables, IP sets, eBPF, WireGuard, VPN tunnels |
+| **BLE / NFC radio tools** | Bluetooth LE sniffing, NFC fuzzing |
+| **Container isolation** | cgroups v2, overlayfs, user/net namespaces (proot, lxc, bubblewrap) |
+| **Filesystem & forensics** | Loop devices, FUSE, fanotify, dm-crypt, NTFS, exFAT |
+| **Crypto primitives** | AES-ARM64-CE, ChaCha20, SHA-3, BLAKE2, full cipher suite |
+| **Process tracing** | ptrace, kprobes, uprobes, ftrace, perf (frida, gdb, strace) |
+| **AI agent kernel interface** | eBPF/BTF, nfqueue, fanotify, taskstats, genetlink for AI pentest agent |
 
 > **Note:** The ROG Phone 5 (ZS673KS) and ROG Phone 5S (ZS676KS) share the same kernel source tree. The only hardware difference relevant to the kernel is the upgraded Snapdragon 888+ CPU; all driver paths and defconfig targets are identical.
 
@@ -172,28 +181,25 @@ A ready-made injection script is provided in [`scripts/usb_inject.sh`](scripts/u
 
 ---
 
-### AndrAX-compatible networking stack
+### Full AndrAX support
 
-[AndrAX](https://github.com/AndraxOS) requires a rich set of kernel networking features. All options listed below must be compiled **into the kernel** (`=y`) or as **loadable modules** (`=m`).
+The kernel config fragment [`configs/rog5s_features.config`](configs/rog5s_features.config) enables **all** kernel features required by every AndrAX tool category. The detailed mapping is in [`configs/andrax_tools.md`](configs/andrax_tools.md).
 
-| Subsystem | Required options |
+Summary of covered subsystems:
+
+| Category | Kernel subsystems enabled |
 |---|---|
-| TUN/TAP (VPN, OpenVPN) | `CONFIG_TUN=y` |
-| Network namespaces | `CONFIG_NET_NS=y`, `CONFIG_NAMESPACES=y` |
-| Virtual Ethernet pairs | `CONFIG_VETH=y` |
-| Bridges | `CONFIG_BRIDGE=y`, `CONFIG_BRIDGE_NETFILTER=y` |
-| IP sets | `CONFIG_IP_SET=y` and sub-modules |
-| NFTables | `CONFIG_NF_TABLES=y` |
-| IPTables (legacy) | `CONFIG_IP_NF_IPTABLES=y`, `CONFIG_IP_NF_FILTER=y` |
-| NAT / masquerade | `CONFIG_NF_NAT=y`, `CONFIG_IP_NF_NAT=y` |
-| Packet socket | `CONFIG_PACKET=y` |
-| Raw sockets | `CONFIG_INET_RAW=y` |
-| Traffic control (TC) | `CONFIG_NET_SCHED=y`, `CONFIG_NET_CLS_BPF=y` |
-| eBPF | `CONFIG_BPF_SYSCALL=y`, `CONFIG_BPF_JIT=y` |
-| XFRM/IPsec | `CONFIG_XFRM_USER=y`, `CONFIG_INET_ESP=y` |
-| Cgroup networking | `CONFIG_CGROUP_NET_PRIO=y`, `CONFIG_NET_CLS_CGROUP=y` |
-| Dummy interfaces | `CONFIG_DUMMY=y` |
-| IPVLAN / MACVLAN | `CONFIG_IPVLAN=y`, `CONFIG_MACVLAN=y` |
+| Wireless attack tools | `cfg80211`, `mac80211`, `NL80211_TESTMODE`, `CFG80211_WEXT` |
+| Bluetooth LE sniffing | `BT`, `BT_HCISOCK`, `BT_LE`, `BT_HCIBTUSB` |
+| NFC fuzzing | `NFC`, `NFC_NCI` |
+| USB injection / gadgets | `USB_GADGET`, `USB_CONFIGFS_F_HID`, `USB_G_HID`, all configfs functions |
+| VPN & tunneling | `TUN`, `WIREGUARD`, `XFRM_USER`, `INET_ESP`, `INET_AH` |
+| Networking / NAT | `NF_TABLES`, `IP_NF_IPTABLES`, `NF_NAT`, `IP_SET`, `NETFILTER_NETLINK_QUEUE` |
+| Container runtime | `CGROUPS` (v1+v2), `OVERLAY_FS`, `NAMESPACES`, `USER_NS`, `SECCOMP_FILTER` |
+| Filesystem forensics | `BLK_DEV_LOOP`, `FUSE_FS`, `FANOTIFY`, `DM_CRYPT`, `NTFS_FS`, `EXFAT_FS` |
+| Crypto / cracking | `CRYPTO_AES_ARM64_CE`, `CRYPTO_SHA3`, `CRYPTO_BLAKE2B`, `CRYPTO_CHACHA20` |
+| Process tracing | `HAVE_PTRACE`, `UPROBES`, `KPROBES`, `FTRACE_SYSCALLS`, `USERFAULTFD` |
+| AI agent interface | `BPF_SYSCALL`, `BPF_LSM`, `DEBUG_INFO_BTF`, `FANOTIFY_ACCESS_PERMISSIONS`, `TASKSTATS`, `GENETLINK` |
 
 ---
 
@@ -260,8 +266,12 @@ Successful output produces:
 adb reboot bootloader
 
 # Flash the new boot image
-#   First, unpack the existing boot.img, replace the kernel, and repack:
-pip3 install --user magiskboot   # or use the Magisk binary directly
+#   First, unpack the existing boot.img, replace the kernel, and repack.
+#   magiskboot is bundled inside the Magisk APK — extract it:
+#     1. Rename Magisk-v*.apk → Magisk.zip, unzip it
+#     2. Copy lib/arm64-v8a/libmagiskboot.so → magiskboot  (chmod +x)
+#   Or download a pre-built magiskboot binary from the Magisk GitHub releases:
+#   https://github.com/topjohnwu/Magisk/releases
 
 #   Grab the stock boot.img from the device
 adb pull /dev/block/by-name/boot stock_boot.img
@@ -308,6 +318,175 @@ adb shell su -c "ls /dev/tun"
 
 ---
 
+## Installing AndrAX after the kernel flash
+
+AndrAX is a full Linux-based penetration-testing environment that runs inside an
+ARM64 chroot on Android (similar to Kali NetHunter).
+
+### Step 1 — Install Magisk (root access)
+
+AndrAX and almost all pentest tools require root. Flash
+[Magisk](https://github.com/topjohnwu/Magisk) via TWRP alongside the kernel zip.
+
+### Step 2 — Install NetHunter or AndrAX
+
+```bash
+# Option A: Kali NetHunter (easiest, well-maintained)
+# Download the arm64 NetHunter installer from https://www.kali.org/get-kali/#kali-mobile
+# Flash via TWRP, then install the NetHunter app from the included APK.
+
+# Option B: AndrAX (dedicated pentest chroot)
+# 1. Download AndrAX bootstrap from the official Telegram/GitHub channel.
+# 2. Extract to /sdcard/andrax/
+# 3. Run the installer script (requires Magisk root):
+adb shell su -c "bash /sdcard/andrax/install.sh"
+```
+
+### Step 3 — Run the feature verification script
+
+```bash
+adb push scripts/andrax_verify.sh /data/local/tmp/
+adb shell su -c "bash /data/local/tmp/andrax_verify.sh"
+```
+
+Expected output: all checks show ✔ green.
+
+### Step 4 — Configure Wi-Fi monitor mode for wireless tools
+
+```bash
+# Inside AndrAX terminal (as root):
+ip link set wlan0 down
+iw dev wlan0 interface add mon0 type monitor
+ip link set wlan0 up
+ip link set mon0 up
+
+# Confirm monitor mode
+iw dev mon0 info | grep type    # should print: type monitor
+
+# Start airodump-ng
+airodump-ng mon0
+```
+
+### Step 5 — Enable USB injection
+
+```bash
+# Run the USB gadget setup (creates /dev/hidg0):
+adb shell su -c "bash /data/local/tmp/usb_inject.sh"
+
+# Type a payload:
+adb shell su -c "bash /data/local/tmp/usb_inject.sh 'Hello from ROG5S!'"
+```
+
+### Step 6 — Quick start for common AndrAX tools
+
+| Goal | Command inside AndrAX chroot |
+|---|---|
+| Wi-Fi WPA handshake capture | `airodump-ng -w /tmp/cap --output-format pcap mon0` |
+| Crack captured handshake | `aircrack-ng -w /sdcard/rockyou.txt /tmp/cap*.cap` |
+| LAN port scan | `nmap -sV -T4 192.168.1.0/24` |
+| Web vuln scan | `nikto -h http://target` |
+| SQL injection test | `sqlmap -u "http://target/page?id=1" --batch` |
+| Reverse shell listener | `msfconsole -q -x "use multi/handler; set PAYLOAD linux/x64/shell_reverse_tcp; run"` |
+| BLE scan | `hcitool lescan` |
+| USB keyboard injection | `/data/local/tmp/usb_inject.sh "payload text"` |
+
+---
+
+## AI Pentest Agent
+
+The file [`scripts/ai_pentest_agent.py`](scripts/ai_pentest_agent.py) is a Python
+AI agent that combines a large language model with direct access to AndrAX tools.
+It can plan, execute, and analyze multi-step penetration tests autonomously.
+
+### Architecture
+
+```
+User goal → LLM Planner → tool calls → Executor → raw output → LLM Analyzer → report
+                ↑                                                      |
+                └──────────────── feedback loop ──────────────────────┘
+```
+
+The kernel's eBPF + fanotify + taskstats interfaces feed real-time telemetry
+(syscalls, network events, file access) directly to the agent for context-aware
+decision-making.
+
+### Quick start
+
+```bash
+# 1. Install Python dependencies (on the phone or host with adb)
+pip3 install openai rich prompt_toolkit
+
+# 2a. Use with OpenAI (GPT-4o)
+export OPENAI_API_KEY="sk-..."
+python3 scripts/ai_pentest_agent.py
+
+# 2b. Use with a local LLM via Ollama (no internet, runs on the phone!)
+#     Install Ollama ARM64: https://ollama.ai/download/linux
+ollama pull llama3
+python3 scripts/ai_pentest_agent.py --local --model llama3
+
+# 3. Interactive console
+agent> Scan 192.168.1.0/24 and find open HTTP services
+
+# 4. One-shot mode
+python3 scripts/ai_pentest_agent.py --goal "Check if 192.168.1.1 is vulnerable to CVE-2021-44228 Log4Shell"
+```
+
+### Supported tools (auto-dispatched by the AI)
+
+| Tool name | What it does |
+|---|---|
+| `nmap` | Port + service scan |
+| `masscan` | Ultra-fast port scan |
+| `wifi_scan` | List nearby Wi-Fi networks |
+| `wifi_monitor` | Enable monitor mode |
+| `airodump` | Capture Wi-Fi traffic |
+| `usb_hid_setup` | Configure USB keyboard gadget |
+| `usb_inject` | Type keystrokes via USB |
+| `nikto` | Web vulnerability scan |
+| `sqlmap` | SQL injection scan |
+| `hashcat` | Password hash cracking |
+| `msf_run` | Run a Metasploit resource script |
+| `bpf_net_watch` | eBPF network telemetry |
+| `proc_watch` | syscall trace a process (strace) |
+
+### Extending the agent with new tools
+
+```python
+# In scripts/ai_pentest_agent.py, add:
+
+@register_tool("my_tool")
+def tool_my_tool(target: str) -> ToolResult:
+    """Short description shown to the LLM."""
+    return _run(["my_binary", "--target", target], timeout=60)
+```
+
+The LLM will automatically discover and use the new tool.
+
+### Future AI improvements planned
+
+- **Fine-tuned model** on public CTF write-ups and CVE PoCs (ARM64 quantized GGUF)
+- **eBPF telemetry integration** — kernel feeds live syscall / network graphs to agent
+- **Autonomous exploit chaining** — agent links recon → vuln scan → exploitation steps
+- **Report generation** — Markdown / PDF pentest report auto-written by the AI
+
+---
+
+## Verifying all features
+
+Run the comprehensive post-flash checker:
+
+```bash
+adb push scripts/andrax_verify.sh /data/local/tmp/
+adb shell su -c "bash /data/local/tmp/andrax_verify.sh"
+```
+
+The script tests 50+ kernel features across Wi-Fi, USB, networking, eBPF,
+crypto, filesystems, and the AI agent interface. It exits with code `0` on
+full success and `1` if any required feature is missing.
+
+---
+
 ## Troubleshooting
 
 | Symptom | Likely cause | Fix |
@@ -317,3 +496,6 @@ adb shell su -c "ls /dev/tun"
 | AndrAX reports missing kernel feature | Missing `CONFIG_*` option | Re-run `merge_config.sh` and rebuild |
 | Bootloop after flash | Mismatched DTB | Make sure you are using `Image.gz-dtb` (combined), not plain `Image.gz` |
 | Fastboot "FAILED (remote: 'Partition doesn't exist')" | Locked bootloader | Unlock via `fastboot oem unlock` (erases data) |
+| `andrax_verify.sh` — config not readable | `CONFIG_IKCONFIG_PROC` not set | Add `CONFIG_IKCONFIG=y` + `CONFIG_IKCONFIG_PROC=y` to the config fragment |
+| AI agent: `openai package not found` | Python dep missing | `pip3 install openai rich prompt_toolkit` |
+| AI agent: LLM timeout | Ollama not running or model not pulled | `ollama serve & ollama pull llama3` |
