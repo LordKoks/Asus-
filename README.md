@@ -45,6 +45,8 @@ This repository documents how to build a custom Android kernel for the ASUS ROG 
 
 > **Note:** The ROG Phone 5 (ZS673KS) and ROG Phone 5S (ZS676KS) share the same kernel source tree. The only hardware difference relevant to the kernel is the upgraded Snapdragon 888+ CPU; all driver paths and defconfig targets are identical.
 
+> **Firmware compatibility:** The kernel source archive is version `33.0210.0210.235`. If your device runs an older firmware (e.g. `WW_33.0210.0210.200` / Android 13, security patch April 2023), the kernel will still boot — the DTB and drivers are forward-compatible within the same major release. However, it is recommended to update to the latest firmware before flashing a custom kernel to avoid driver version mismatches.
+
 ---
 
 ## Prerequisites
@@ -80,6 +82,15 @@ sudo apt install -y \
 ---
 
 ## Obtaining and extracting the kernel source
+
+### Automated (recommended)
+
+```bash
+bash scripts/download_kernel_src.sh          # downloads + extracts to ~/rog5s-kernel
+bash scripts/download_kernel_src.sh /my/path  # or specify a custom directory
+```
+
+### Manual
 
 ```bash
 # 1. Download (≈ 450 MB)
