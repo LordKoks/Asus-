@@ -1,0 +1,393 @@
+name: Build ROG Phone 5S Custom Kernel
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Triggers
+# ─────────────────────────────────────────────────────────────────────────────
+on:
+  push:
+    branches: [ "**" ]
+    paths:
+      - 'configs/rog5s_features.config'
+      - 'scripts/build_kernel.sh'
+      - 'scripts/clang_build_kernel.sh'
+      - '.github/workflows/build_kernel.yml'
+  pull_request:
+    paths:
+      - 'configs/rog5s_features.config'
+  workflow_dispatch:          # allow manual trigger from the GitHub UI
+    inputs:
+      kernel_tag:
+        description: 'ASUS kernel source tag / branch (default: ASUSKernel-ROG5S-33.0210.0210.235)'
+        required: false
+        default: 'ASUSKernel-ROG5S-33.0210.0210.235'
+      upload_artifact:
+        description: 'Upload flashable ZIP as artifact?'
+        required: false
+        default: 'true'
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Global env
+# ─────────────────────────────────────────────────────────────────────────────
+env:
+  ARCH: arm64
+  SUBARCH: arm64
+  KERNEL_SOURCE_REPO: https://github.com/ASUS-ZenfoneMax-Development/android_kernel_asus_sm8350
+  # Official ASUS open-source release (mirror on GitHub)
+  KERNEL_SOURCE_FALLBACK: https://github.com/LineageOS/android_kernel_asus_sm8350
+  KERNEL_BRANCH: ${{ github.event.inputs.kernel_tag || 'lineage-20' }}
+  DEFCONFIG: vendor/kona-perf_defconfig
+  CLANG_VERSION: r487747c      # LLVM/Clang used by AOSP 13 (works great with SM8350)
+  CLANG_URL: https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86
+  ANYKERNEL3_REPO: https://github.com/osm0sis/AnyKernel3
+
+jobs:
+# ─────────────────────────────────────────────────────────────────────────────
+# Job 1: Validate the config fragment (fast, no toolchain needed)
+# ─────────────────────────────────────────────────────────────────────────────
+  validate-config:
+    name: Validate kernel config fragment
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check config fragment exists and is non-empty
+        run: |
+          set -euo pipefail
+          FILE=configs/rog5s_features.config
+          echo "=== Config fragment: $FILE ==="
+          wc -l "$FILE"
+          echo ""
+          echo "--- Checking for required AndrAX keys ---"
+          REQUIRED=(
+            CONFIG_CFG80211
+            CONFIG_MAC80211
+            CONFIG_TUN
+            CONFIG_NAMESPACES
+            CONFIG_NET_NS
+            CONFIG_USER_NS
+            CONFIG_VETH
+            CONFIG_BRIDGE
+            CONFIG_NF_TABLES
+            CONFIG_IP_NF_IPTABLES
+            CONFIG_NF_NAT
+            CONFIG_BPF_SYSCALL
+            CONFIG_BPF_JIT
+            CONFIG_WIREGUARD
+            CONFIG_OVERLAY_FS
+            CONFIG_CGROUPS
+            CONFIG_SECCOMP
+            CONFIG_SECCOMP_FILTER
+            CONFIG_FUSE_FS
+            CONFIG_FANOTIFY
+            CONFIG_CRYPTO_AES
+            CONFIG_CRYPTO_SHA256
+            CONFIG_HAVE_PTRACE
+            CONFIG_KPROBES
+            CONFIG_UPROBES
+            CONFIG_USB_GADGET
+            CONFIG_USB_CONFIGFS_F_HID
+            CONFIG_IKCONFIG_PROC
+            CONFIG_TASKSTATS
+            CONFIG_BPF_LSM
+          )
+          MISSING=()
+          for key in "${REQUIRED[@]}"; do
+            if ! grep -q "^${key}[=\s]" "$FILE"; then
+              echo "  MISSING: $key"
+              MISSING+=("$key")
+            else
+              echo "  OK: $key"
+            fi
+          done
+          if [[ ${#MISSING[@]} -gt 0 ]]; then
+            echo ""
+            echo "ERROR: ${#MISSING[@]} required AndrAX config options are missing!"
+            exit 1
+          fi
+          echo ""
+          echo "All required AndrAX config options present."
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Job 2: Full kernel build
+# ─────────────────────────────────────────────────────────────────────────────
+  build-kernel:
+    name: Build kernel (Clang + SM8350)
+    runs-on: ubuntu-22.04
+    needs: validate-config
+    timeout-minutes: 120
+    permissions:
+      contents: read
+
+    steps:
+      # ── 1. Checkout this repo ────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          path: asus-custom-kernel-repo
+
+      # ── 2. Install build dependencies ───────────────────────────────────
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends \
+            bc bison build-essential ca-certificates curl flex \
+            git gnupg libssl-dev libelf-dev lz4 python3 python3-pip \
+            zip unzip wget rsync \
+            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+            libncurses-dev ccache
+
+      # ── 3. Cache: Clang toolchain ────────────────────────────────────────
+      - name: Cache Clang toolchain
+        id: cache-clang
+        uses: actions/cache@v4
+        with:
+          path: ~/clang
+          key: clang-${{ env.CLANG_VERSION }}-v1
+
+      - name: Download Clang toolchain
+        if: steps.cache-clang.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/clang
+          # Use the prebuilt Clang from AOSP (ARM64 Android kernel official toolchain)
+          CLANG_TAR="clang-${CLANG_VERSION}.tar.gz"
+          wget -q --show-progress \
+            "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/master/clang-${CLANG_VERSION}.tar.gz" \
+            -O "/tmp/${CLANG_TAR}" || \
+          wget -q --show-progress \
+            "https://github.com/kdrag0n/proton-clang/releases/download/20230611/proton-clang-20230611.tar.zst" \
+            -O "/tmp/proton-clang.tar.zst"
+          
+          if [[ -f /tmp/proton-clang.tar.zst ]]; then
+            sudo apt-get install -y zstd
+            tar -I zstd -xf /tmp/proton-clang.tar.zst --strip-components=1 -C ~/clang
+          else
+            tar -xzf "/tmp/${CLANG_TAR}" -C ~/clang
+          fi
+          echo "Clang version: $(~/clang/bin/clang --version | head -1)"
+
+      # ── 4. Cache: kernel source ──────────────────────────────────────────
+      - name: Cache kernel source
+        id: cache-kernel-src
+        uses: actions/cache@v4
+        with:
+          path: ~/kernel-src
+          key: kernel-src-sm8350-${{ env.KERNEL_BRANCH }}-v1
+
+      - name: Clone kernel source
+        if: steps.cache-kernel-src.outputs.cache-hit != 'true'
+        run: |
+          echo "Cloning ASUS SM8350 kernel source (branch: $KERNEL_BRANCH) …"
+          # Try the ASUS-specific mirror first, fall back to LineageOS
+          git clone --depth=1 \
+            --branch "$KERNEL_BRANCH" \
+            "$KERNEL_SOURCE_FALLBACK" \
+            ~/kernel-src \
+          || git clone --depth=1 \
+               "https://github.com/ASUS-Mobile-Open-Source/android_kernel_asus_sm8350" \
+               ~/kernel-src
+          echo "Kernel source cloned: $(git -C ~/kernel-src log --oneline -1)"
+
+      # ── 5. Apply config fragment (preserve it untouched) ─────────────────
+      - name: Apply AndrAX config fragment
+        run: |
+          set -euo pipefail
+          REPO="${GITHUB_WORKSPACE}/asus-custom-kernel-repo"
+          KDIR="$HOME/kernel-src"
+          
+          echo "=== Generating base .config from defconfig ==="
+          make -C "$KDIR" \
+            ARCH=arm64 \
+            CC="${HOME}/clang/bin/clang" \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            O="${KDIR}/out" \
+            "$DEFCONFIG"
+          
+          echo ""
+          echo "=== Merging AndrAX config fragment (UNTOUCHED) ==="
+          echo "Fragment: $REPO/configs/rog5s_features.config"
+          
+          # The fragment is applied on top; stock options stay if not overridden
+          cd "$KDIR"
+          ./scripts/kconfig/merge_config.sh \
+            -m "${KDIR}/out/.config" \
+            "$REPO/configs/rog5s_features.config"
+          
+          # Run olddefconfig to fill in any new symbols with defaults
+          make -C "$KDIR" \
+            ARCH=arm64 \
+            CC="${HOME}/clang/bin/clang" \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            O="${KDIR}/out" \
+            olddefconfig
+          
+          echo ""
+          echo "=== Verifying merged config ==="
+          for key in CONFIG_TUN CONFIG_WIREGUARD CONFIG_BPF_SYSCALL \
+                     CONFIG_OVERLAY_FS CONFIG_SECCOMP_FILTER CONFIG_BPF_LSM \
+                     CONFIG_IKCONFIG_PROC CONFIG_TASKSTATS; do
+            val=$(grep "^${key}=" "${KDIR}/out/.config" 2>/dev/null || echo "NOT SET")
+            echo "  $key = $val"
+          done
+
+      # ── 6. Build ─────────────────────────────────────────────────────────
+      - name: Build kernel
+        run: |
+          set -euo pipefail
+          KDIR="$HOME/kernel-src"
+          JOBS=$(nproc)
+          export CCACHE_DIR="${HOME}/.ccache"
+          export PATH="${HOME}/clang/bin:${PATH}"
+          
+          echo "=== Building with -j${JOBS} ==="
+          make -C "$KDIR" \
+            ARCH=arm64 \
+            CC="ccache ${HOME}/clang/bin/clang" \
+            LD="${HOME}/clang/bin/ld.lld" \
+            AR="${HOME}/clang/bin/llvm-ar" \
+            NM="${HOME}/clang/bin/llvm-nm" \
+            OBJCOPY="${HOME}/clang/bin/llvm-objcopy" \
+            OBJDUMP="${HOME}/clang/bin/llvm-objdump" \
+            STRIP="${HOME}/clang/bin/llvm-strip" \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            O="${KDIR}/out" \
+            -j"${JOBS}" \
+            Image dtbs modules 2>&1 | tail -50
+          
+          echo ""
+          echo "=== Build output ==="
+          ls -lh "${KDIR}/out/arch/arm64/boot/"
+
+      # ── 7. Install modules ────────────────────────────────────────────────
+      - name: Install kernel modules
+        run: |
+          KDIR="$HOME/kernel-src"
+          mkdir -p "${KDIR}/out/modules_out"
+          make -C "$KDIR" \
+            ARCH=arm64 \
+            CC="${HOME}/clang/bin/clang" \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            O="${KDIR}/out" \
+            INSTALL_MOD_PATH="${KDIR}/out/modules_out" \
+            modules_install
+
+      # ── 8. Package into AnyKernel3 flashable ZIP ─────────────────────────
+      - name: Package AnyKernel3 ZIP
+        run: |
+          set -euo pipefail
+          REPO="${GITHUB_WORKSPACE}/asus-custom-kernel-repo"
+          KDIR="$HOME/kernel-src"
+          AK3_DIR=$(mktemp -d)
+          TIMESTAMP=$(date +%Y%m%d-%H%M)
+          ZIP_NAME="ROG5S-AndrAX-Kernel-${TIMESTAMP}.zip"
+          ZIP_PATH="${GITHUB_WORKSPACE}/${ZIP_NAME}"
+          
+          echo "=== Cloning AnyKernel3 ==="
+          git clone --depth=1 "$ANYKERNEL3_REPO" "$AK3_DIR"
+          
+          # Copy kernel image (prefer Image.gz-dtb, fall back to Image)
+          if [[ -f "${KDIR}/out/arch/arm64/boot/Image.gz-dtb" ]]; then
+            cp "${KDIR}/out/arch/arm64/boot/Image.gz-dtb" "${AK3_DIR}/Image.gz-dtb"
+          elif [[ -f "${KDIR}/out/arch/arm64/boot/Image" ]]; then
+            cp "${KDIR}/out/arch/arm64/boot/Image" "${AK3_DIR}/Image"
+          fi
+          
+          # Copy DTBs
+          mkdir -p "${AK3_DIR}/dtbs"
+          find "${KDIR}/out/arch/arm64/boot/dts" -name "*.dtb" \
+               -exec cp {} "${AK3_DIR}/dtbs/" \; 2>/dev/null || true
+          
+          # Copy modules
+          mkdir -p "${AK3_DIR}/modules/system/lib/modules"
+          find "${KDIR}/out/modules_out" -name "*.ko" \
+               -exec cp {} "${AK3_DIR}/modules/system/lib/modules/" \; 2>/dev/null || true
+          
+          # Write anykernel.sh
+          cat > "${AK3_DIR}/anykernel.sh" <<'ANYKERNEL'
+          properties() { '
+          kernel.string=ROG5S-AndrAX (WiFi-Monitor + USB-HID + AndrAX Full + AI Agent)
+          do.devicecheck=1
+          do.modules=1
+          do.systemless=1
+          do.cleanup=1
+          do.cleanuponabort=0
+          device.name1=ZS676KS
+          device.name2=I005D
+          '; }
+          block=/dev/block/by-name/boot;
+          is_slot_device=0;
+          ramdisk_compression=auto;
+          patch_vbmeta_flag=auto;
+          . tools/ak3-core.sh;
+          . $patch_boot;
+          split_boot;
+          flash_boot;
+          ANYKERNEL
+          
+          # Pack ZIP
+          (cd "$AK3_DIR" && zip -r9 "$ZIP_PATH" . -x "*.git*" > /dev/null)
+          echo "ZIP_PATH=${ZIP_PATH}" >> "$GITHUB_ENV"
+          echo "ZIP_NAME=${ZIP_NAME}" >> "$GITHUB_ENV"
+          echo "Flashable ZIP: $ZIP_PATH ($(du -sh $ZIP_PATH | cut -f1))"
+
+      # ── 9. Save .config as artifact (for debugging / reproducibility) ──────
+      - name: Save final .config
+        run: |
+          cp "$HOME/kernel-src/out/.config" \
+             "${GITHUB_WORKSPACE}/rog5s-built-kernel.config"
+
+      # ── 10. Upload artifacts ──────────────────────────────────────────────
+      - name: Upload flashable ZIP
+        if: ${{ github.event.inputs.upload_artifact != 'false' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ZIP_NAME }}
+          path: ${{ env.ZIP_PATH }}
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload kernel Image
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-image-${{ github.run_number }}
+          path: |
+            ~/kernel-src/out/arch/arm64/boot/Image*
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Upload final .config
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-config-${{ github.run_number }}
+          path: rog5s-built-kernel.config
+          retention-days: 90
+
+      # ── 11. Print build summary ───────────────────────────────────────────
+      - name: Build summary
+        if: always()
+        run: |
+          echo ""
+          echo "╔══════════════════════════════════════╗"
+          echo "║       ROG Phone 5S Kernel Build       ║"
+          echo "╚══════════════════════════════════════╝"
+          echo " Device   : ASUS ROG Phone 5S (ZS676KS)"
+          echo " SoC      : Snapdragon 888+ (SM8350-AC)"
+          echo " Kernel   : $(uname -r) → custom"
+          echo " Branch   : $KERNEL_BRANCH"
+          echo " Config   : configs/rog5s_features.config (PRESERVED)"
+          echo " Run      : #${{ github.run_number }}"
+          echo ""
+          if [[ -f "$HOME/kernel-src/out/arch/arm64/boot/Image" ]] || \
+             [[ -f "$HOME/kernel-src/out/arch/arm64/boot/Image.gz-dtb" ]]; then
+            echo " STATUS   : ✅ BUILD SUCCESS"
+            echo " ZIP      : $ZIP_NAME"
+          else
+            echo " STATUS   : ❌ BUILD FAILED"
+          fi
+          echo ""
