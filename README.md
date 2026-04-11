@@ -1,9 +1,11 @@
 # ASUS ROG Phone 5S — Custom Kernel: Wi-Fi Monitor Mode, USB Injection, Full AndrAX & AI Pentest Agent
 
-> **Target device:** ASUS ROG Phone 5S (ZS676KS)  
+> **Target device:** ASUS ROG Phone 5S (ZS676KS) — model `ASUS_I005DA`  
 > **SoC:** Qualcomm Snapdragon 888+ (SM8350-AC)  
-> **Kernel base:** Linux 5.4 (ASUS open-source release `33.0210.0210.235`)  
-> **Kernel source:** [ASUS_I005_1-33.0210.0210.235-kernel-src.tar.gz](https://dlcdnets.asus.com/pub/ASUS/ZenFone/ROG%20Phone%205%20(ZS673KS)/ASUS_I005_1-33.0210.0210.235-kernel-src.tar.gz?model=ROG%20Phone%205S%20(ZS676KS))
+> **Firmware build:** `WW_33.0210.0210.200` (Android 13, security patch April 2023)  
+> **Kernel base:** Linux 5.4.210 (ASUS open-source release `33.0210.0210.200`)  
+> **Kernel source:** [ASUS_I005_1-33.0210.0210.200-kernel-src.tar.gz](https://dlcdnets.asus.com/pub/ASUS/ZenFone/ZS673KS/ASUS_I005_1-33.0210.0210.200-kernel-src.tar.gz)  
+> **Firmware (OTA):** [UL-ASUS_I005_1-ASUS-33.0210.0210.200-1.1.300-2304-user.zip](https://dlcdnets.asus.com/pub/ASUS/ZenFone/ZS673KS/UL-ASUS_I005_1-ASUS-33.0210.0210.200-1.1.300-2304-user.zip)
 
 ---
 
@@ -11,7 +13,7 @@
 
 1. [Overview](#overview)
 2. [Prerequisites](#prerequisites)
-3. [Obtaining and extracting the kernel source](#obtaining-and-extracting-the-kernel-source)
+3. [Obtaining kernel source and firmware](#obtaining-kernel-source-and-firmware)
 4. [Enabled features](#enabled-features)
    - [Wi-Fi monitor mode](#wi-fi-monitor-mode)
    - [USB HID gadget (USB injection)](#usb-hid-gadget-usb-injection)
@@ -31,6 +33,8 @@
 
 This repository documents how to build a custom Android kernel for the ASUS ROG Phone 5S that enables **every feature required by AndrAX** (the ARM64 Android penetration-testing framework) plus an optional AI-powered pentest agent.
 
+The kernel source and OTA firmware used here are version `33.0210.0210.200` — the exact release that matches device build `WW_33.0210.0210.200` (Android 13, kernel `5.4.210`).  Both components have been verified for compatibility: the `Makefile` in the source tree reports `5.4.210`, and the DTBO extracted from the OTA firmware contains `I005` / ROG-trigger identifiers that match the hardware.
+
 | Feature | Purpose |
 |---|---|
 | **Wi-Fi monitor mode** | Passive wireless packet capture, injection (airodump-ng, aircrack-ng, wifite…) |
@@ -44,8 +48,6 @@ This repository documents how to build a custom Android kernel for the ASUS ROG 
 | **AI agent kernel interface** | eBPF/BTF, nfqueue, fanotify, taskstats, genetlink for AI pentest agent |
 
 > **Note:** The ROG Phone 5 (ZS673KS) and ROG Phone 5S (ZS676KS) share the same kernel source tree. The only hardware difference relevant to the kernel is the upgraded Snapdragon 888+ CPU; all driver paths and defconfig targets are identical.
-
-> **Firmware compatibility:** The kernel source archive is version `33.0210.0210.235`. If your device runs an older firmware (e.g. `WW_33.0210.0210.200` / Android 13, security patch April 2023), the kernel will still boot — the DTB and drivers are forward-compatible within the same major release. However, it is recommended to update to the latest firmware before flashing a custom kernel to avoid driver version mismatches.
 
 ---
 
@@ -81,29 +83,66 @@ sudo apt install -y \
 
 ---
 
-## Obtaining and extracting the kernel source
+## Obtaining kernel source and firmware
 
-### Automated (recommended)
+There are two components you need before building:
+
+| Component | Description | Script |
+|---|---|---|
+| **Kernel source** ("skeleton") | ASUS open-source C/C++ code for Linux 5.4.210 | `scripts/download_kernel_src.sh` |
+| **OTA firmware** ("body") | Full system image; used to extract the proprietary DTBO hardware config | `scripts/download_firmware.sh` |
+
+### Step 1 — Download the kernel source
 
 ```bash
 bash scripts/download_kernel_src.sh          # downloads + extracts to ~/rog5s-kernel
 bash scripts/download_kernel_src.sh /my/path  # or specify a custom directory
 ```
 
-### Manual
+Manual equivalent:
 
 ```bash
-# 1. Download (≈ 450 MB)
-wget -O asus-rog5s-kernel-src.tar.gz \
-  "https://dlcdnets.asus.com/pub/ASUS/ZenFone/ROG%20Phone%205%20(ZS673KS)/ASUS_I005_1-33.0210.0210.235-kernel-src.tar.gz?model=ROG%20Phone%205S%20(ZS676KS)"
+wget -O ~/skeleton.tar.gz \
+  "https://dlcdnets.asus.com/pub/ASUS/ZenFone/ZS673KS/ASUS_I005_1-33.0210.0210.200-kernel-src.tar.gz"
 
-# 2. Extract
 mkdir -p ~/rog5s-kernel
-tar -xzf asus-rog5s-kernel-src.tar.gz -C ~/rog5s-kernel --strip-components=1
-
-# 3. Enter the source tree
-cd ~/rog5s-kernel
+tar -xzf ~/skeleton.tar.gz -C ~/rog5s-kernel --strip-components=1
 ```
+
+### Step 2 — Download the OTA firmware
+
+```bash
+bash scripts/download_firmware.sh            # downloads to ~/body.zip (~4 GB)
+bash scripts/download_firmware.sh /my/path/firmware.zip  # custom path
+```
+
+### Step 3 — Extract the DTBO and convert to DTS
+
+The OTA zip contains `payload.bin` which bundles all partition images. The script
+uses [`payload-dumper-go`](https://github.com/ssut/payload-dumper-go) to unpack
+the `dtbo` partition and `dtc` to convert the binary blob to a readable DTS file.
+
+```bash
+bash scripts/extract_dtbo.sh                 # reads ~/body.zip, writes ~/body_config.dts
+bash scripts/extract_dtbo.sh ~/body.zip ~/body_config.dts  # explicit paths
+```
+
+The resulting `~/body_config.dts` contains the proprietary hardware parameters
+(voltages, ROG trigger mappings, GPIO assignments, etc.) that ASUS does not
+publish in the open-source kernel drop.  Cross-referencing this file with the
+kernel source lets you verify that the two components are compatible.
+
+#### Termux (on-device build)
+
+All three scripts work in Termux. Install the required tools first:
+
+```bash
+pkg install python git golang dtc wget
+go install github.com/ssut/payload-dumper-go@latest
+```
+
+Then run the scripts exactly as shown above — the Go binary is placed in
+`~/go/bin/payload-dumper-go` and the scripts will find it automatically.
 
 ---
 

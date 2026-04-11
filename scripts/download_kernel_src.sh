@@ -18,8 +18,8 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 
 DEST_DIR="${1:-$HOME/rog5s-kernel}"
-ARCHIVE_NAME="ASUS_I005_1-33.0210.0210.235-kernel-src.tar.gz"
-DOWNLOAD_URL="https://dlcdnets.asus.com/pub/ASUS/ZenFone/ROG%20Phone%205%20(ZS673KS)/${ARCHIVE_NAME}?model=ROG%20Phone%205S%20(ZS676KS)"
+ARCHIVE_NAME="ASUS_I005_1-33.0210.0210.200-kernel-src.tar.gz"
+DOWNLOAD_URL="https://dlcdnets.asus.com/pub/ASUS/ZenFone/ZS673KS/${ARCHIVE_NAME}"
 
 # Colours
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
@@ -51,7 +51,7 @@ fi
 
 echo -e "\n${BOLD}${CYAN}ASUS ROG Phone 5S — Kernel Source Download${NC}\n"
 echo -e "  Source  : ASUS official kernel-src release"
-echo -e "  Version : 33.0210.0210.235 (Linux 5.4, SM8350)"
+echo -e "  Version : 33.0210.0210.200 (Linux 5.4, SM8350)"
 echo -e "  Device  : ROG Phone 5 (ZS673KS) / ROG Phone 5S (ZS676KS)"
 echo -e "  Size    : ~450 MB"
 echo ""
@@ -94,6 +94,5 @@ echo -e "  2. Build with Clang: bash scripts/clang_build_kernel.sh $DEST_DIR"
 echo ""
 
 warn "Firmware compatibility note:"
-warn "  This kernel source is for firmware 33.0210.0210.235."
-warn "  If your phone runs an older version (e.g. WW_33.0210.0210.200),"
-warn "  update the phone first or verify DTB/driver compatibility."
+warn "  This kernel source matches firmware 33.0210.0210.200 (Android 13, April 2023)."
+warn "  It is the exact source for device build WW_33.0210.0210.200."
