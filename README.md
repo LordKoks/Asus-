@@ -221,17 +221,23 @@ Apply the defconfig fragment provided in this repository on top of the stock ASU
 ```bash
 cd ~/rog5s-kernel
 
+mkdir -p out
+
 # Start with the stock defconfig for the ROG Phone 5(S)
 make ARCH=arm64 \
      CROSS_COMPILE=aarch64-linux-gnu- \
+     O=out \
      vendor/kona-perf_defconfig
 
 # Merge the custom fragment (adds/overrides the options above)
-KCONFIG_CONFIG=.config scripts/kconfig/merge_config.sh \
-  .config configs/rog5s_features.config
+scripts/kconfig/merge_config.sh -m \
+  out/.config configs/rog5s_features.config
+
+# Normalize any newly introduced symbols
+make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- O=out olddefconfig
 
 # Optional: review / further tune with menuconfig
-make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- menuconfig
+make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- O=out menuconfig
 ```
 
 The fragment file [`configs/rog5s_features.config`](configs/rog5s_features.config) is included in this repository.
@@ -241,20 +247,26 @@ The fragment file [`configs/rog5s_features.config`](configs/rog5s_features.confi
 ## Building the kernel
 
 ```bash
+# GCC / binutils workflow
+bash scripts/build_kernel.sh ~/rog5s-kernel
+
+# Clang / LLVM workflow
+bash scripts/clang_build_kernel.sh ~/rog5s-kernel
+```
+
+If you prefer the manual path, the equivalent steps are:
+
+```bash
 cd ~/rog5s-kernel
 
 export ARCH=arm64
 export CROSS_COMPILE=aarch64-linux-gnu-
-export CLANG_TRIPLE=aarch64-linux-gnu-
-
-# If ASUS uses Clang (common for Qualcomm kernels):
-export CC=clang
-export HOSTCC=gcc
 
 # Build (adjust -j to match your CPU core count)
 make -j$(nproc) \
      ARCH=arm64 \
      CROSS_COMPILE=aarch64-linux-gnu- \
+  O=out \
      Image.gz-dtb dtbs modules
 
 # Package modules
@@ -263,8 +275,9 @@ make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
 ```
 
 Successful output produces:
-- `arch/arm64/boot/Image.gz-dtb` — combined kernel + device-tree blob
+- `out/arch/arm64/boot/Image.gz-dtb` — combined kernel + device-tree blob
 - `out/modules/` — loadable kernel modules
+- `rog5s-custom-kernel-*.zip` or `ROG5S-AndrAX-Kernel-*.zip` in the repository root — flashable AnyKernel3 package
 
 ---
 
@@ -303,7 +316,7 @@ fastboot reboot
 
 ### Via TWRP
 
-1. Copy `arch/arm64/boot/Image.gz-dtb` to a zip using AnyKernel3.
+1. Build one of the provided flashable AnyKernel3 zips with the scripts above.
 2. Sideload or copy the zip to `/sdcard/`.
 3. In TWRP → Install → select the zip → Swipe to flash.
 
@@ -381,7 +394,10 @@ airodump-ng mon0
 ### Step 5 — Enable USB injection
 
 ```bash
-# Run the USB gadget setup (creates /dev/hidg0):
+# Run the USB gadget setup explicitly (creates /dev/hidg0):
+adb shell su -c "bash /data/local/tmp/usb_inject.sh setup"
+
+# Or call without arguments; the script defaults to setup mode:
 adb shell su -c "bash /data/local/tmp/usb_inject.sh"
 
 # Type a payload:

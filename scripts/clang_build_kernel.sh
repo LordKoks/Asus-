@@ -34,6 +34,26 @@ OUT_DIR="$KERNEL_DIR/out"
 JOBS=$(nproc)
 TIMESTAMP=$(date +%Y%m%d-%H%M)
 KERNEL_ZIP="$REPO_DIR/ROG5S-AndrAX-Kernel-$TIMESTAMP.zip"
+MODULES_ENABLED=0
+CC_WRAPPER=""
+
+choose_defconfig() {
+    local candidates=(
+        "vendor/kona-perf_defconfig"
+        "vendor/ZS673KS-perf_defconfig"
+        "vendor/ZS673KS_defconfig"
+    )
+    local cfg
+
+    for cfg in "${candidates[@]}"; do
+        if [[ -f "$KERNEL_DIR/arch/arm64/configs/$cfg" ]]; then
+            DEFCONFIG="$cfg"
+            return 0
+        fi
+    done
+
+    error "Не найден поддерживаемый defconfig. Проверено: ${candidates[*]}"
+}
 
 # Toolchain
 CROSS_COMPILE=aarch64-linux-gnu-
@@ -108,8 +128,10 @@ if [[ ! -d "$KERNEL_DIR" ]]; then
         "$KERNEL_DIR"
 fi
 [[ -f "$KERNEL_DIR/Makefile" ]] || error "Директория не является исходниками ядра: $KERNEL_DIR"
+choose_defconfig
 KERNEL_VERSION=$(make -C "$KERNEL_DIR" kernelversion 2>/dev/null || grep "^VERSION = " "$KERNEL_DIR/Makefile" | awk '{print $3}')
 info "Ядро: $KERNEL_VERSION | Путь: $KERNEL_DIR"
+info "Defconfig: $DEFCONFIG"
 
 # ---------------------------------------------------------------------------
 # 4. Генерация .config (defconfig + наш фрагмент — НЕИЗМЕНЁН)
@@ -129,18 +151,27 @@ make -C "$KERNEL_DIR" \
 
 info "Сливаю AndrAX фрагмент: $CONFIG_FRAGMENT"
 info "(ВНИМАНИЕ: фрагмент применяется как есть, без изменений)"
-cd "$KERNEL_DIR"
-./scripts/kconfig/merge_config.sh -m \
-    "$OUT_DIR/.config" \
-    "$CONFIG_FRAGMENT"
+(
+    cd "$OUT_DIR"
+    KCONFIG_CONFIG=.config "$KERNEL_DIR/scripts/kconfig/merge_config.sh" -m \
+        .config \
+        "$CONFIG_FRAGMENT"
+)
+rm -f "$KERNEL_DIR/.config"
 
 info "Запускаю olddefconfig (заполняю новые символы значениями по умолчанию) …"
 make -C "$KERNEL_DIR" \
     ARCH=$ARCH \
     CC="$CLANG_DIR/bin/clang" \
     CROSS_COMPILE=$CROSS_COMPILE \
+    CROSS_COMPILE_COMPAT=$CROSS_COMPILE_COMPAT \
+    CLANG_TRIPLE=$CLANG_TRIPLE \
     O="$OUT_DIR" \
-    olddefconfig
+    olddefconfig < /dev/null
+
+if grep -q '^CONFIG_MODULES=y' "$OUT_DIR/.config"; then
+    MODULES_ENABLED=1
+fi
 
 # Верификация ключевых опций
 info "Проверяю ключевые AndrAX опции в .config:"
@@ -162,9 +193,24 @@ done
 step "5. Сборка (-j$JOBS)"
 START_TIME=$(date +%s)
 
+BUILD_TARGETS=(Image)
+if [[ "${ROG5S_BUILD_DTBS:-0}" == "1" ]]; then
+    BUILD_TARGETS+=(dtbs)
+fi
+if [[ "$MODULES_ENABLED" -eq 1 ]]; then
+    BUILD_TARGETS+=(modules)
+else
+    warn "CONFIG_MODULES отключён; пропускаю modules"
+fi
+
+if command -v ccache >/dev/null 2>&1; then
+    CC_WRAPPER="ccache "
+fi
+
 make -C "$KERNEL_DIR" \
     ARCH=$ARCH \
-    CC="ccache $CLANG_DIR/bin/clang" \
+    CC="${CC_WRAPPER}$CLANG_DIR/bin/clang" \
+    KCFLAGS="-Wno-error" \
     LD="$CLANG_DIR/bin/ld.lld" \
     AR="$CLANG_DIR/bin/llvm-ar" \
     NM="$CLANG_DIR/bin/llvm-nm" \
@@ -176,7 +222,7 @@ make -C "$KERNEL_DIR" \
     CLANG_TRIPLE=$CLANG_TRIPLE \
     O="$OUT_DIR" \
     -j"$JOBS" \
-    Image dtbs modules
+    "${BUILD_TARGETS[@]}"
 
 END_TIME=$(date +%s)
 BUILD_SECS=$((END_TIME - START_TIME))
@@ -186,15 +232,19 @@ info "Сборка завершена за $((BUILD_SECS/60))м $((BUILD_SECS%60
 # 6. Установка модулей
 # ---------------------------------------------------------------------------
 step "6. Модули"
-mkdir -p "$OUT_DIR/modules_out"
-make -C "$KERNEL_DIR" \
-    ARCH=$ARCH \
-    CC="$CLANG_DIR/bin/clang" \
-    CROSS_COMPILE=$CROSS_COMPILE \
-    O="$OUT_DIR" \
-    INSTALL_MOD_PATH="$OUT_DIR/modules_out" \
-    modules_install
-info "Модули установлены"
+if [[ "$MODULES_ENABLED" -eq 1 ]]; then
+    mkdir -p "$OUT_DIR/modules_out"
+    make -C "$KERNEL_DIR" \
+        ARCH=$ARCH \
+        CC="$CLANG_DIR/bin/clang" \
+        CROSS_COMPILE=$CROSS_COMPILE \
+        O="$OUT_DIR" \
+        INSTALL_MOD_PATH="$OUT_DIR/modules_out" \
+        modules_install
+    info "Модули установлены"
+else
+    warn "Пропускаю modules_install (CONFIG_MODULES=n)"
+fi
 
 # ---------------------------------------------------------------------------
 # 7. Упаковка AnyKernel3 ZIP
@@ -224,13 +274,17 @@ fi
 
 # Копируем DTB
 mkdir -p "$AK3_DIR/dtbs"
-find "$OUT_DIR/arch/$ARCH/boot/dts" -name "*.dtb" -exec cp {} "$AK3_DIR/dtbs/" \; 2>/dev/null || true
+if [[ -d "$OUT_DIR/arch/$ARCH/boot/dts" ]]; then
+    find "$OUT_DIR/arch/$ARCH/boot/dts" -name "*.dtb" -exec cp {} "$AK3_DIR/dtbs/" \; 2>/dev/null || true
+fi
 
 # Копируем модули
-mkdir -p "$AK3_DIR/modules/system/lib/modules"
-find "$OUT_DIR/modules_out" -name "*.ko" \
-     -exec cp {} "$AK3_DIR/modules/system/lib/modules/" \; 2>/dev/null || true
-MOD_COUNT=$(find "$AK3_DIR/modules/system/lib/modules/" -name "*.ko" | wc -l)
+if [[ "$MODULES_ENABLED" -eq 1 ]]; then
+    mkdir -p "$AK3_DIR/modules/system/lib/modules"
+    find "$OUT_DIR/modules_out" -name "*.ko" \
+         -exec cp {} "$AK3_DIR/modules/system/lib/modules/" \; 2>/dev/null || true
+fi
+MOD_COUNT=$(find "$AK3_DIR/modules" -name "*.ko" 2>/dev/null | wc -l)
 info "Модулей: $MOD_COUNT"
 
 # anykernel.sh
@@ -238,7 +292,7 @@ cat > "$AK3_DIR/anykernel.sh" <<'ANYKERNEL'
 properties() { '
 kernel.string=ROG5S-AndrAX (WiFi-Monitor + USB-HID + AndrAX Full + AI Pentest Agent)
 do.devicecheck=1
-do.modules=1
+do.modules=0
 do.systemless=1
 do.cleanup=1
 do.cleanuponabort=0
@@ -268,6 +322,8 @@ ash $ZIPFILE anykernel.sh install
 UPDBINARY
     echo "true" > "$AK3_DIR/META-INF/com/google/android/updater-script"
 fi
+
+chmod +x "$AK3_DIR/META-INF/com/google/android/update-binary" 2>/dev/null || true
 
 # Создаём ZIP
 (cd "$AK3_DIR" && zip -r9 "$KERNEL_ZIP" . -x "*.git*" > /dev/null)

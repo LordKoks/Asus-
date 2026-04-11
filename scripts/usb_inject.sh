@@ -15,10 +15,20 @@
 set -euo pipefail
 
 HIDG=/dev/hidg0
+CONFIGFS_MOUNT=/config
+GADGET_DIR="$CONFIGFS_MOUNT/usb_gadget/hid_inject"
+GADGET_LANG=0x409
+GADGET_MANUFACTURER=ROG5S
+GADGET_PRODUCT="HID Keyboard"
+GADGET_CONFIG="HID Config"
+GADGET_VENDOR=0x1d6b
+GADGET_PRODUCT_ID=0x0104
+REPORT_DESC='\x05\x01\x09\x06\xa1\x01\x05\x07\x19\xe0\x29\xe7\x15\x00\x25\x01\x75\x01\x95\x08\x81\x02\x95\x01\x75\x08\x81\x03\x95\x05\x75\x01\x05\x08\x19\x01\x29\x05\x91\x02\x95\x01\x75\x03\x91\x03\x95\x06\x75\x08\x15\x00\x25\x65\x05\x07\x19\x00\x29\x65\x81\x00\xc0'
 
 usage() {
-    echo "Usage: $0 [-f file] [\"string to type\"]"
-    echo "  -f FILE   Read keystrokes from file (one character per line)"
+    echo "Usage: $0 [setup] [-f file] [\"string to type\"]"
+    echo "  setup     Create and enable the HID gadget via configfs"
+    echo "  -f FILE   Read keystrokes from file (one line per Enter)"
     exit 1
 }
 
@@ -39,6 +49,74 @@ declare -A KEY_MAP=(
 
 # Characters that require Shift modifier (modifier byte = 0x02)
 SHIFT_CHARS="ABCDEFGHIJKLMNOPQRSTUVWXYZ!@#\$%^&*()_+{}|:\"<>?"
+
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
+info() { echo -e "${GREEN}[INFO]${NC} $*"; }
+warn() { echo -e "${YELLOW}[WARN]${NC} $*" >&2; }
+error() { echo -e "${RED}[ERROR]${NC} $*" >&2; exit 1; }
+
+require_root() {
+    [[ $(id -u) -eq 0 ]] || error "must run as root (su / Magisk)"
+}
+
+ensure_configfs() {
+    mkdir -p "$CONFIGFS_MOUNT"
+    if ! mountpoint -q "$CONFIGFS_MOUNT"; then
+        mount -t configfs none "$CONFIGFS_MOUNT"
+    fi
+}
+
+detach_gadget() {
+    if [[ -f "$GADGET_DIR/UDC" ]]; then
+        printf '' > "$GADGET_DIR/UDC" 2>/dev/null || true
+    fi
+}
+
+setup_gadget() {
+    local udc
+
+    require_root
+    ensure_configfs
+
+    if [[ ! -d /sys/class/udc ]]; then
+        error "/sys/class/udc is missing; USB gadget mode is not available"
+    fi
+
+    udc=$(ls /sys/class/udc 2>/dev/null | head -1)
+    [[ -n "$udc" ]] || error "No UDC found under /sys/class/udc"
+
+    mkdir -p "$GADGET_DIR"
+    detach_gadget
+
+    printf '%s' "$GADGET_VENDOR" > "$GADGET_DIR/idVendor"
+    printf '%s' "$GADGET_PRODUCT_ID" > "$GADGET_DIR/idProduct"
+
+    mkdir -p "$GADGET_DIR/strings/$GADGET_LANG"
+    printf '%s' "$GADGET_MANUFACTURER" > "$GADGET_DIR/strings/$GADGET_LANG/manufacturer"
+    printf '%s' "$GADGET_PRODUCT" > "$GADGET_DIR/strings/$GADGET_LANG/product"
+
+    mkdir -p "$GADGET_DIR/functions/hid.usb0"
+    printf '1' > "$GADGET_DIR/functions/hid.usb0/protocol"
+    printf '1' > "$GADGET_DIR/functions/hid.usb0/subclass"
+    printf '8' > "$GADGET_DIR/functions/hid.usb0/report_length"
+    printf '%b' "$REPORT_DESC" > "$GADGET_DIR/functions/hid.usb0/report_desc"
+
+    mkdir -p "$GADGET_DIR/configs/c.1/strings/$GADGET_LANG"
+    printf '%s' "$GADGET_CONFIG" > "$GADGET_DIR/configs/c.1/strings/$GADGET_LANG/configuration"
+    printf '250' > "$GADGET_DIR/configs/c.1/MaxPower"
+
+    if [[ ! -L "$GADGET_DIR/configs/c.1/hid.usb0" ]]; then
+        ln -s "$GADGET_DIR/functions/hid.usb0" "$GADGET_DIR/configs/c.1/hid.usb0"
+    fi
+
+    printf '%s' "$udc" > "$GADGET_DIR/UDC"
+
+    if [[ -c "$HIDG" ]]; then
+        info "HID gadget is ready on $HIDG via UDC $udc"
+    else
+        warn "Gadget enabled via UDC $udc, but $HIDG is not present yet"
+    fi
+}
 
 send_key() {
     local modifier="$1"   # 0x00 = none, 0x02 = left shift
@@ -80,20 +158,22 @@ type_string() {
 # ---------------------------------------------------------------------------
 # Argument parsing
 # ---------------------------------------------------------------------------
-RED='\033[0;31m'; YELLOW='\033[1;33m'; NC='\033[0m'
-warn() { echo -e "${YELLOW}[WARN]${NC} $*" >&2; }
+if [[ "${1:-}" == "setup" ]]; then
+    setup_gadget
+    exit 0
+fi
 
-[[ -c "$HIDG" ]] || { echo "Error: $HIDG not found. Is the HID gadget configured?"; exit 1; }
-[[ $(id -u) -eq 0 ]] || { echo "Error: must run as root (su / Magisk)"; exit 1; }
+require_root
+[[ -c "$HIDG" ]] || error "$HIDG not found. Run '$0 setup' first"
 
 if [[ "${1:-}" == "-f" ]]; then
     [[ -f "${2:-}" ]] || usage
     while IFS= read -r line; do
         type_string "$line"
-        send_key "0x00" "0x28"   # Enter after each line
+        send_key "0x00" "0x28"
     done < "$2"
 elif [[ -n "${1:-}" ]]; then
     type_string "$1"
 else
-    usage
+    setup_gadget
 fi
