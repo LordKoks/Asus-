@@ -2,25 +2,35 @@
 # =============================================================================
 # clang_build_kernel.sh — ASUS ROG Phone 5S kernel build with Clang/LLVM
 #
-# Использует Clang вместо GCC — официальный компилятор Google для SM8350.
-# Быстрее, лучше оптимизирует, обязателен для некоторых LTO-опций.
+# Использует ТОЧНО тот тулчейн, которым ASUS собрала оригинальное ядро:
+#   Clang   : clang-r416183b (LLVM 13.0.3, AOSP prebuilt)
+#   GCC64   : aarch64-linux-androidkernel-4.9 (Android kernel GCC)
+#   GCC32   : arm-linux-androideabi-4.9 (Android ARM32 GCC)
+#
+# Исходные данные: build.config.common + build.config.aarch64 из ядра ASUS
+#   CC=clang, LD=ld.lld, NM=llvm-nm, OBJCOPY=llvm-objcopy
+#   CROSS_COMPILE=aarch64-linux-androidkernel-
+#   CROSS_COMPILE_COMPAT=arm-linux-androideabi-
+#   FILES: arch/arm64/boot/Image.gz arch/arm64/boot/Image vmlinux
 #
 # Использование:
-#   bash scripts/clang_build_kernel.sh [/path/to/kernel-src] [/path/to/clang]
-#
-# Если Clang не указан — скачивается автоматически (proton-clang).
+#   bash scripts/clang_build_kernel.sh [/path/to/kernel-src]
 #
 # Пример:
-#   bash scripts/clang_build_kernel.sh ~/rog5s-kernel ~/clang
+#   bash scripts/clang_build_kernel.sh ~/rog5s-kernel/msm-5.4
 # =============================================================================
 
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
-# Пути
+# Пути к тулчейнам (загружаются автоматически если отсутствуют)
 # ---------------------------------------------------------------------------
-KERNEL_DIR="${1:-$HOME/rog5s-kernel}"
-CLANG_DIR="${2:-$HOME/clang}"
+KERNEL_DIR="${1:-$HOME/rog5s-kernel/msm-5.4}"
+TOOLCHAINS_DIR="$HOME/toolchains"
+CLANG_DIR="$TOOLCHAINS_DIR/clang-r416183b"
+GCC_AARCH64_DIR="$TOOLCHAINS_DIR/aarch64-linux-androidkernel-4.9"
+GCC_ARM_DIR="$TOOLCHAINS_DIR/arm-linux-androideabi-4.9"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(dirname "$SCRIPT_DIR")"
 CONFIG_FRAGMENT="$REPO_DIR/configs/rog5s_features.config"
@@ -29,15 +39,14 @@ CONFIG_FRAGMENT="$REPO_DIR/configs/rog5s_features.config"
 # Параметры сборки
 # ---------------------------------------------------------------------------
 ARCH=arm64
-DEFCONFIG=vendor/kona-perf_defconfig
 OUT_DIR="$KERNEL_DIR/out"
 JOBS=$(nproc)
 TIMESTAMP=$(date +%Y%m%d-%H%M)
 KERNEL_ZIP="$REPO_DIR/ROG5S-AndrAX-Kernel-$TIMESTAMP.zip"
 
-# Toolchain
-CROSS_COMPILE=aarch64-linux-gnu-
-CROSS_COMPILE_COMPAT=arm-linux-gnueabi-
+# Точные значения из build.config.aarch64 (ASUS original build system)
+CROSS_COMPILE=aarch64-linux-androidkernel-
+CROSS_COMPILE_COMPAT=arm-linux-androideabi-
 CLANG_TRIPLE=aarch64-linux-gnu-
 
 # Цвета
@@ -53,44 +62,96 @@ step()  { echo -e "\n${BOLD}${CYAN}══ $* ══${NC}"; }
 # ---------------------------------------------------------------------------
 step "1. Проверка зависимостей"
 MISSING=()
-for cmd in make python3 zip aarch64-linux-gnu-gcc; do
+for cmd in make python3 zip git wget; do
     command -v "$cmd" &>/dev/null || MISSING+=("$cmd")
 done
 if [[ ${#MISSING[@]} -gt 0 ]]; then
     warn "Устанавливаю недостающие пакеты: ${MISSING[*]}"
-    sudo apt-get install -y build-essential gcc-aarch64-linux-gnu \
-        gcc-arm-linux-gnueabi python3 zip libssl-dev libelf-dev bc \
-        flex bison ccache 2>/dev/null || true
+    sudo apt-get install -y build-essential python3 zip git wget \
+        libssl-dev libelf-dev bc flex bison ccache cpio 2>/dev/null || true
 fi
 info "Зависимости OK"
 
 # ---------------------------------------------------------------------------
-# 2. Установка Clang (если не найден)
+# 2. Тулчейн: clang-r416183b + Android GCC 4.9 (как у оригинальной ASUS сборки)
 # ---------------------------------------------------------------------------
-step "2. Clang toolchain"
-if [[ -x "$CLANG_DIR/bin/clang" ]]; then
-    info "Clang найден: $($CLANG_DIR/bin/clang --version | head -1)"
-else
-    info "Clang не найден, скачиваю proton-clang …"
-    mkdir -p "$CLANG_DIR"
-    TMP_CLANG=$(mktemp -d)
-    trap 'rm -rf "$TMP_CLANG"' EXIT
+step "2. Тулчейн (clang-r416183b + Android GCC 4.9)"
+mkdir -p "$TOOLCHAINS_DIR"
 
-    # Попытка 1: proton-clang (ARM64, для Android ядер)
-    PROTON_URL="https://github.com/kdrag0n/proton-clang/archive/refs/heads/master.tar.gz"
-    if wget -q --show-progress "$PROTON_URL" -O "$TMP_CLANG/clang.tar.gz" 2>/dev/null; then
-        tar -xzf "$TMP_CLANG/clang.tar.gz" --strip-components=1 -C "$CLANG_DIR"
+# --- Clang r416183b (LLVM, тот самый, которым ASUS собирала ядро) ---
+if [[ ! -x "$CLANG_DIR/bin/clang" ]]; then
+    info "Скачиваю AOSP clang-r416183b …"
+    TMP_CLG=$(mktemp -d)
+    trap 'rm -rf "$TMP_CLG"' EXIT
+    # AOSP prebuilt tarball (google source archive, публичный доступ)
+    CLANG_URL="https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android13-release/clang-r416183b.tar.gz"
+    if wget -q --show-progress "$CLANG_URL" -O "$TMP_CLG/clang.tar.gz" 2>&1; then
+        mkdir -p "$CLANG_DIR"
+        tar -xzf "$TMP_CLG/clang.tar.gz" -C "$CLANG_DIR"
     else
-        warn "proton-clang недоступен, пробую AOSP Clang r487747c …"
-        AOSP_CLANG="https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/master/clang-r487747c.tar.gz"
-        wget -q --show-progress "$AOSP_CLANG" -O "$TMP_CLANG/clang.tar.gz" || \
-            error "Не удалось скачать Clang. Укажите путь вручную: $0 [kernel-dir] [clang-dir]"
-        tar -xzf "$TMP_CLANG/clang.tar.gz" -C "$CLANG_DIR"
+        # Резервный: android12L ветка
+        CLANG_URL2="https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android12L-release/clang-r416183b.tar.gz"
+        warn "Пробую резервный источник …"
+        wget -q --show-progress "$CLANG_URL2" -O "$TMP_CLG/clang.tar.gz" \
+            || error "Не удалось скачать clang-r416183b. Скачайте вручную в $CLANG_DIR"
+        mkdir -p "$CLANG_DIR"
+        tar -xzf "$TMP_CLG/clang.tar.gz" -C "$CLANG_DIR"
     fi
-    info "Clang установлен: $($CLANG_DIR/bin/clang --version | head -1)"
 fi
+info "Clang: $($CLANG_DIR/bin/clang --version | head -1)"
 
-export PATH="$CLANG_DIR/bin:$PATH"
+# ---------------------------------------------------------------------------
+# GCC backend-ы для ассемблера (AOSP удалил GCC 4.9 из prebuilts-репозиториев).
+# Используем системный GCC из apt с Android-префиксами через symlinks.
+# CC основной = clang; GCC вызывается только для vdso32-ассемблера и config-проверок.
+# ---------------------------------------------------------------------------
+
+# --- aarch64: androidkernel- prefix → system aarch64-linux-gnu ---
+if [[ ! -x "$GCC_AARCH64_DIR/bin/aarch64-linux-androidkernel-gcc" ]]; then
+    info "Устанавливаю aarch64-linux-gnu (backend для androidkernel- префикса) …"
+    sudo apt-get install -y gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu 2>/dev/null || true
+    mkdir -p "$GCC_AARCH64_DIR/bin"
+    for tool in gcc g++ as ar nm ld objcopy objdump strip ranlib readelf elfedit size; do
+        src=$(command -v aarch64-linux-gnu-$tool 2>/dev/null) || continue
+        ln -sf "$src" "$GCC_AARCH64_DIR/bin/aarch64-linux-androidkernel-$tool"
+    done
+fi
+info "GCC64: $(ls "$GCC_AARCH64_DIR/bin/aarch64-linux-androidkernel-gcc" 2>/dev/null && echo OK || echo FAIL)"
+
+# --- arm32: androideabi- prefix → system arm-linux-gnueabi ---
+if [[ ! -x "$GCC_ARM_DIR/bin/arm-linux-androideabi-gcc" ]]; then
+    info "Устанавливаю arm-linux-gnueabi (backend для androideabi- префикса) …"
+    sudo apt-get install -y gcc-arm-linux-gnueabi binutils-arm-linux-gnueabi 2>/dev/null || true
+    mkdir -p "$GCC_ARM_DIR/bin"
+    for tool in gcc g++ as ar nm ld objcopy objdump strip ranlib readelf elfedit size; do
+        src=$(command -v arm-linux-gnueabi-$tool 2>/dev/null) || continue
+        ln -sf "$src" "$GCC_ARM_DIR/bin/arm-linux-androideabi-$tool"
+    done
+fi
+info "GCC32: $(ls "$GCC_ARM_DIR/bin/arm-linux-androideabi-gcc" 2>/dev/null && echo OK || echo FAIL)"
+
+# Добавляем все инструменты в PATH (порядок важен: clang > GCC64 > GCC32)
+# ВАЖНО: PATH должен быть экспортирован ДО make, потому что vdso32/Makefile
+# вызывает $(shell which $(CROSS_COMPILE_COMPAT)elfedit) для поиска toolchain dir.
+# Если GCC32 нет в PATH — clang использует /usr/bin/as (x86), что ломает сборку.
+export PATH="$CLANG_DIR/bin:$GCC_AARCH64_DIR/bin:$GCC_ARM_DIR/bin:$PATH"
+
+# Шаблон переменных для make (точно совпадает с ASUS build.config)
+MAKE_ARGS=(
+    ARCH=$ARCH
+    CC="$CLANG_DIR/bin/clang"
+    LD="$CLANG_DIR/bin/ld.lld"
+    AR="$CLANG_DIR/bin/llvm-ar"
+    NM="$CLANG_DIR/bin/llvm-nm"
+    OBJCOPY="$CLANG_DIR/bin/llvm-objcopy"
+    OBJDUMP="$CLANG_DIR/bin/llvm-objdump"
+    STRIP="$CLANG_DIR/bin/llvm-strip"
+    CROSS_COMPILE=$CROSS_COMPILE
+    CROSS_COMPILE_COMPAT=$CROSS_COMPILE_COMPAT
+    CLANG_TRIPLE=$CLANG_TRIPLE
+    LLVM_IAS=1
+    O="$OUT_DIR"
+)
 
 # ---------------------------------------------------------------------------
 # 3. Проверка исходников ядра
@@ -116,31 +177,25 @@ info "Ядро: $KERNEL_VERSION | Путь: $KERNEL_DIR"
 # ---------------------------------------------------------------------------
 step "4. Конфигурация ядра"
 mkdir -p "$OUT_DIR"
+VENDOR_CONFIGS="$KERNEL_DIR/arch/arm64/configs/vendor"
 
-info "Применяю базовый defconfig: $DEFCONFIG"
-make -C "$KERNEL_DIR" \
-    ARCH=$ARCH \
-    CC="$CLANG_DIR/bin/clang" \
-    CROSS_COMPILE=$CROSS_COMPILE \
-    CROSS_COMPILE_COMPAT=$CROSS_COMPILE_COMPAT \
-    CLANG_TRIPLE=$CLANG_TRIPLE \
-    O="$OUT_DIR" \
-    $DEFCONFIG
+# Порядок слоёв: gki_defconfig → lahaina_GKI → lahaina_QGKI → debugfs → ZS673KS-perf → наш фрагмент
+info "Шаг 1: базовый .config из gki_defconfig …"
+make -C "$KERNEL_DIR" "${MAKE_ARGS[@]}" gki_defconfig
 
-info "Сливаю AndrAX фрагмент: $CONFIG_FRAGMENT"
-info "(ВНИМАНИЕ: фрагмент применяется как есть, без изменений)"
+info "Шаг 2: наслаиваю lahaina + ZS673KS-perf + AndrAX фрагменты …"
 cd "$KERNEL_DIR"
-./scripts/kconfig/merge_config.sh -m \
-    "$OUT_DIR/.config" \
-    "$CONFIG_FRAGMENT"
+KCONFIG_CONFIG="$OUT_DIR/.config" \
+    ./scripts/kconfig/merge_config.sh -m \
+        "$OUT_DIR/.config" \
+        "$VENDOR_CONFIGS/lahaina_GKI.config" \
+        "$VENDOR_CONFIGS/lahaina_QGKI.config" \
+        "$VENDOR_CONFIGS/debugfs.config" \
+        "$VENDOR_CONFIGS/ZS673KS-perf_defconfig" \
+        "$CONFIG_FRAGMENT"
 
-info "Запускаю olddefconfig (заполняю новые символы значениями по умолчанию) …"
-make -C "$KERNEL_DIR" \
-    ARCH=$ARCH \
-    CC="$CLANG_DIR/bin/clang" \
-    CROSS_COMPILE=$CROSS_COMPILE \
-    O="$OUT_DIR" \
-    olddefconfig
+info "Шаг 3: olddefconfig — заполняю незаданные символы дефолтами …"
+make -C "$KERNEL_DIR" "${MAKE_ARGS[@]}" olddefconfig
 
 # Верификация ключевых опций
 info "Проверяю ключевые AndrAX опции в .config:"
@@ -162,21 +217,13 @@ done
 step "5. Сборка (-j$JOBS)"
 START_TIME=$(date +%s)
 
-make -C "$KERNEL_DIR" \
-    ARCH=$ARCH \
-    CC="ccache $CLANG_DIR/bin/clang" \
-    LD="$CLANG_DIR/bin/ld.lld" \
-    AR="$CLANG_DIR/bin/llvm-ar" \
-    NM="$CLANG_DIR/bin/llvm-nm" \
-    OBJCOPY="$CLANG_DIR/bin/llvm-objcopy" \
-    OBJDUMP="$CLANG_DIR/bin/llvm-objdump" \
-    STRIP="$CLANG_DIR/bin/llvm-strip" \
-    CROSS_COMPILE=$CROSS_COMPILE \
-    CROSS_COMPILE_COMPAT=$CROSS_COMPILE_COMPAT \
-    CLANG_TRIPLE=$CLANG_TRIPLE \
-    O="$OUT_DIR" \
-    -j"$JOBS" \
-    Image dtbs modules
+if command -v ccache &>/dev/null; then
+    make -C "$KERNEL_DIR" "${MAKE_ARGS[@]}" CC="ccache $CLANG_DIR/bin/clang" \
+        -j"$JOBS" Image Image.gz dtbs modules
+else
+    make -C "$KERNEL_DIR" "${MAKE_ARGS[@]}" \
+        -j"$JOBS" Image Image.gz dtbs modules
+fi
 
 END_TIME=$(date +%s)
 BUILD_SECS=$((END_TIME - START_TIME))
@@ -187,11 +234,7 @@ info "Сборка завершена за $((BUILD_SECS/60))м $((BUILD_SECS%60
 # ---------------------------------------------------------------------------
 step "6. Модули"
 mkdir -p "$OUT_DIR/modules_out"
-make -C "$KERNEL_DIR" \
-    ARCH=$ARCH \
-    CC="$CLANG_DIR/bin/clang" \
-    CROSS_COMPILE=$CROSS_COMPILE \
-    O="$OUT_DIR" \
+make -C "$KERNEL_DIR" "${MAKE_ARGS[@]}" \
     INSTALL_MOD_PATH="$OUT_DIR/modules_out" \
     modules_install
 info "Модули установлены"

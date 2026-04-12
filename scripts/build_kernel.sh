@@ -17,14 +17,13 @@ set -euo pipefail
 # Configuration
 # ---------------------------------------------------------------------------
 
-KERNEL_DIR="${1:-$HOME/rog5s-kernel}"
+KERNEL_DIR="${1:-$HOME/rog5s-kernel/msm-5.4}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(dirname "$SCRIPT_DIR")"
 CONFIG_FRAGMENT="$REPO_DIR/configs/rog5s_features.config"
 
 ARCH=arm64
 CROSS_COMPILE=aarch64-linux-gnu-
-DEFCONFIG=vendor/kona-perf_defconfig
 OUT_DIR="$KERNEL_DIR/out"
 JOBS=$(nproc)
 
@@ -60,25 +59,36 @@ info "Kernel source: $KERNEL_DIR"
 # ---------------------------------------------------------------------------
 # 3. Generate .config from defconfig + feature fragment
 # ---------------------------------------------------------------------------
-info "Generating .config from $DEFCONFIG …"
-cd "$KERNEL_DIR"
-make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE "$DEFCONFIG"
+# Layer order: gki_defconfig → lahaina_GKI → lahaina_QGKI → debugfs → ZS673KS-perf → features
+VENDOR_CONFIGS="$KERNEL_DIR/arch/arm64/configs/vendor"
 
-info "Merging feature fragment: $CONFIG_FRAGMENT …"
-scripts/kconfig/merge_config.sh .config "$CONFIG_FRAGMENT"
-info ".config merge complete."
+info "Step 1: Generating base .config from gki_defconfig …"
+cd "$KERNEL_DIR"
+make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE O="$OUT_DIR" gki_defconfig
+
+info "Step 2: Merging lahaina platform layers + ZS673KS overrides + feature fragment …"
+KCONFIG_CONFIG="$OUT_DIR/.config" \
+    scripts/kconfig/merge_config.sh -m \
+        "$OUT_DIR/.config" \
+        "$VENDOR_CONFIGS/lahaina_GKI.config" \
+        "$VENDOR_CONFIGS/lahaina_QGKI.config" \
+        "$VENDOR_CONFIGS/debugfs.config" \
+        "$VENDOR_CONFIGS/ZS673KS-perf_defconfig" \
+        "$CONFIG_FRAGMENT"
+
+info "Step 3: Resolving config symbols (olddefconfig) …"
+make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE O="$OUT_DIR" olddefconfig
+info ".config generation complete."
 
 # ---------------------------------------------------------------------------
 # 4. Build
 # ---------------------------------------------------------------------------
-mkdir -p "$OUT_DIR"
-
 info "Building kernel with -j$JOBS …"
 make -j"$JOBS" \
      ARCH=$ARCH \
      CROSS_COMPILE=$CROSS_COMPILE \
      O="$OUT_DIR" \
-     Image.gz-dtb dtbs modules
+     Image dtbs modules
 
 info "Installing kernel modules …"
 make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE \
